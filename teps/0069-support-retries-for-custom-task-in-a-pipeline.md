@@ -56,7 +56,7 @@ not possible for the custom tasks to propagate `context.pipelineTask.retries`
 and `context.pipelineTask.retry-count` values.
 
 In addition to supporting the above, this TEP will give us an opportunity to
-bring in standard way of supporting retry amongst custom controllers.
+bring in standard/uniform way of supporting retry amongst custom controllers.
 
 A custom task controller - developer SDK, might also benefit from this support,
 in the future, for example it can include documentation and stub code to make it
@@ -91,36 +91,61 @@ if this problem is solved?).
 
 ## Requirements
 
-<!--
-Describe constraints on the solution that must be met. Examples might include
-performance characteristics that must be met, specific edge cases that must
-be handled, or user scenarios that will be affected and must be accomodated.
--->
+None.
 
 ## Proposal
 
-<!--
-This is where we get down to the specifics of what the proposal actually is.
-This should have enough detail that reviewers can understand exactly what
-you're proposing, but should not include things like API designs or
-implementation.  The "Design Details" section below is for the real
-nitty-gritty.
--->
+Requesting API changes:
+
+1. Add field `Retries` to `RunSpec`, an integer count acts as an FYI. 
+2. Add a new `RunRetry`, in addition to `RunCancelled` status to `RunSpecStatus`
+   i.e. `v1alpha1.RunSpecStatusRetry`
+3. Add a field `RetriesStatus` to `RunStatusFields`, to maintain the retry
+   history for a `Run`, similar to `v1beta1.TaskRunStatusFields.RetriesStatus`
+
+Proposed algorithm for performing a retry for custom task.
+
+- Step 1. A `pipelineTask` consisting of a custom task X, is configured with 
+  `retries` count.
+  
+- Step 2. On failure of task X, `pipelinerun` controller sees a request for a
+  retry. It then communicates the same to custom task `Run` by patching 
+  `/spec/status` with a `v1alpha1.RunSpecStatusRetry` i.e. `RunRetry`. Similar
+  to request a custom task to cancel.
+  
+- Step 3. In addition to patching the `pipelinerun` controller also enqueue a timer
+  `EnqueueAfter(30*time.Second)` (configurable). On completion of timeout
+  (i.e. 30s), it checks if `/spec/status` is `RunRetry`, then it assumes that
+  custom task does not support retry. 
+    - a) if custom task does not supports retry as above, It sets no. of `retry done`
+    to the `retries` count configured - i.e. exhaust all retries.
+    - b) if custom task does support retry, update retry history and
+      `context.pipelineTask.retry-count`
+
+- Step 4. The custom task that wants to support the retry, has to update
+  - a) clear `/spec/status` if it is `RunRetry`.
+  - b) `status.conditions` to indicate it is `Running`.
+
+_A task may retry and immediately fail, so controller cannot
+fully rely on `status.conditions`._
 
 ### Notes/Caveats (optional)
 
 Q. A Custom task does not support retry, and is configured to run with retry.
   How to gracefully handle this case?
 
+  _Approach proposed:_ The `pipelineRun` waits for a configurable shorter timeout
+  (say 30s), and if the custom task controller does not signal that it has begun
+  to retry, assume it does not support retry.
+
+Other options:
+
 * Option 1: The `pipelineRun` should wait till the timeout and fail. The
   downside of this approach is, it may wait for a very long period of time.
 * Option 2: It should have a way of knowing custom task does not support a
   retry. e.g. Custom controllers declaring that they support retry, somehow
   (not sure how this can be done).
-* Option 3: The `pipelineRun` waits for a configurable shorter timeout
-  (say 30s), and if the custom task controller does not signal that it has begun
-  to retry, assume it does not support retry.
-
+  
 ### Risks and Mitigations
 
 <!--
